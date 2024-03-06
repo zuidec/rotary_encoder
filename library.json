@@ -12,14 +12,9 @@
   [
     {
       "name": "zuidec",
-      "email": "",
-      "url": ""
     },
   ],
-  "license": "",
-  "homepage": "",
   "dependencies": {
-    "ownername/print": ""
   },
   "frameworks": "arduino",
   "platforms": "*"
