@@ -1,0 +1,26 @@
+{
+  "name": "RotaryEncoder",
+  "version": "0.5.0",
+  "description": "Small library to abstract KY-40 rotary encoder using Arduino framework",
+  "keywords": "rotary, encoder, ky40, ky-40",
+  "repository":
+  {
+    "type": "git",
+    "url": "https://github.com/zuidec/rotary_encoder.git"
+  },
+  "authors":
+  [
+    {
+      "name": "zuidec",
+      "email": "",
+      "url": ""
+    },
+  ],
+  "license": "",
+  "homepage": "",
+  "dependencies": {
+    "ownername/print": "~1.3.0"
+  },
+  "frameworks": "arduino",
+  "platforms": "*"
+}
