@@ -5,7 +5,7 @@
  *	Created by zuidec on 02/15/24
  */
 
-#include "encoder.h"
+#include "rotary_encoder.h"
 #include "esp32-hal-gpio.h"
 #include "esp32-hal.h"
 #include "esp_bit_defs.h"
