@@ -5,7 +5,7 @@
  *	Created by zuidec on 02/15/24
  */
 
-#include "rotary_encoder.h"
+#include "encoder.h"
 #include "esp32-hal-gpio.h"
 #include "esp32-hal.h"
 #include "esp_bit_defs.h"
@@ -14,8 +14,7 @@
 #include <sys/_stdint.h>
 
 uint8_t RotaryEncoder::isr_instance_flag = 0;
-RotaryEncoder *RotaryEncoder::encoderISRInstances[MAX_ENCODER_ISR];
-RotaryEncoder *RotaryEncoder::switchISRInstances[MAX_ENCODER_ISR];
+RotaryEncoder *RotaryEncoder::ISRInstances[MAX_ENCODER_ISR];
 
 RotaryEncoder::RotaryEncoder(   uint8_t rotary_clk_pin, uint8_t rotary_dt_pin, 
                                 uint8_t rotary_sw_pin, bool interrupt_enabled)  {
@@ -23,23 +22,22 @@ RotaryEncoder::RotaryEncoder(   uint8_t rotary_clk_pin, uint8_t rotary_dt_pin,
     DT_PIN  = rotary_dt_pin;
     SW_PIN  = rotary_sw_pin;
 
-    pinMode(rotary_clk_pin, INPUT);
-    pinMode(rotary_dt_pin, INPUT);
-    pinMode(rotary_sw_pin, INPUT_PULLUP);
+    pinMode(CLK_PIN, INPUT);
+    pinMode(DT_PIN,  INPUT);
+    pinMode(SW_PIN, INPUT_PULLUP);
+    digitalWrite(CLK_PIN, HIGH); 
+    digitalWrite(DT_PIN, HIGH); 
     
-    last_encoder_position = (last_encoder_position & ~(1 << CLK_BIT)) | (digitalRead(CLK_PIN) << CLK_BIT);
-    last_encoder_position = (last_encoder_position & ~(1 << DT_BIT)) | (digitalRead(DT_PIN) << DT_BIT);
-    last_encoder_position = 0x00;
-    current_encoder_position = last_encoder_position;
+    encoder_state = ENCODER_START_STATE;
+    last_encoder_position = DIR_NO_MOVE;
     last_switch_press = millis();
     switch_pressed = false;
     
-    if(interrupt_enabled && (digitalPinToInterrupt(rotary_clk_pin) != NOT_AN_INTERRUPT) && (digitalPinToInterrupt(rotary_sw_pin) != NOT_AN_INTERRUPT))  {
+    if(interrupt_enabled && (digitalPinToInterrupt(CLK_PIN) != NOT_AN_INTERRUPT) && (digitalPinToInterrupt(SW_PIN) != NOT_AN_INTERRUPT))  {
         for(uint8_t i=0; i< MAX_ENCODER_ISR; i++)   {
             if(!(isr_instance_flag & _BV(i)))    {
                 instance_id = i;
-                encoderISRInstances[instance_id] = this;
-                switchISRInstances[instance_id] = this;
+                ISRInstances[instance_id] = this;
                 isr_instance_flag |= _BV(instance_id);
                 break; 
             }   
@@ -55,65 +53,34 @@ RotaryEncoder::RotaryEncoder(   uint8_t rotary_clk_pin, uint8_t rotary_dt_pin,
             switchISR4, switchISR5, switchISR6, switchISR7
         };
         
-        attachInterrupt(digitalPinToInterrupt(rotary_clk_pin), encoderISRFunction[instance_id], RISING);
-        attachInterrupt(digitalPinToInterrupt(rotary_sw_pin), switchISRFunction[instance_id], FALLING);
+        attachInterrupt(digitalPinToInterrupt(CLK_PIN), encoderISRFunction[instance_id], CHANGE);
+        attachInterrupt(digitalPinToInterrupt(DT_PIN), encoderISRFunction[instance_id], CHANGE);
+        attachInterrupt(digitalPinToInterrupt(SW_PIN), switchISRFunction[instance_id], FALLING);
     }
 
 }
 
 RotaryEncoder::~RotaryEncoder(void) {
     detachInterrupt(digitalPinToInterrupt(CLK_PIN));
+    detachInterrupt(digitalPinToInterrupt(DT_PIN));
     detachInterrupt(digitalPinToInterrupt(SW_PIN));
     isr_instance_flag &= ~_BV(instance_id);
 }
 
-RotaryEncoder::EncoderDirection RotaryEncoder::getDirection(void)  {
-
-    if((current_encoder_position & (1 << CLK_BIT)) != (last_encoder_position & (1 << CLK_BIT))) {
-
-        last_encoder_position = current_encoder_position;
-        /*
-         *  The rotary encoder when going CW causes the following:
-         *  CLK_HIGH -> DT_HIGH -> CLK_LOW -> DT_LOW
-         *  
-         *  CCW rotation is the following:
-         *  DT_HIGH -> CLK_HIGH -> DT_LOW -> CLK_LOW
-         *
-         *  By only calculating direction when CLK_BIT is changed, there are
-         *  only 4 combinations of CLK and DT:
-         *  CLK 1:  DT = 1 -> CCW   (0x03)
-         *          DT = 0 -> CW    (0x02)
-         *  CLK 0:  DT = 1 -> CW    (0x01)
-         *          DT = 0 -> CCW   (0x00)
-         *
-         */
-
-        switch(current_encoder_position)    {
-            case 0x03:
-                return ENCODER_CCW;
-                break;
-            case 0x02:
-                return ENCODER_CW;
-                break;
-            case 0x01:
-                return ENCODER_CW;
-                break;
-            case 0x00:
-                return ENCODER_CCW;
-            case 0xff:
-                return ENCODER_TEST;
-                break;
-        }
-        
-    }
-    
-    return ENCODER_NOMOVE;
-
+uint8_t RotaryEncoder::getDirection(void)   {
+    uint8_t ret = last_encoder_position;
+    last_encoder_position = DIR_NO_MOVE;
+    return ret;
 }
 
+bool RotaryEncoder::switchPressed(void) {
+    bool ret = switch_pressed;
+    switch_pressed = false;
+    return ret;
+}
 bool RotaryEncoder::isAvailable(void) {
 
-    if((current_encoder_position & ( 1 << CLK_BIT)) != (last_encoder_position & ( 1 << CLK_BIT))) {
+    if(last_encoder_position != DIR_NO_MOVE) {
         return true;
     }
     else    {
@@ -123,8 +90,17 @@ bool RotaryEncoder::isAvailable(void) {
 
 void RotaryEncoder::instanceEncoderISR(void)  {
 
-    current_encoder_position = ((current_encoder_position & ~(1 << CLK_BIT)) | (digitalRead(CLK_PIN) << CLK_BIT));
-    current_encoder_position = ((current_encoder_position  & ~(1 << DT_BIT)) | (digitalRead(DT_PIN) << DT_BIT));
+    uint8_t current_encoder_position = (digitalRead(CLK_PIN) << 1) | digitalRead(DT_PIN);
+    encoder_state = state_table[encoder_state & 0x0F][current_encoder_position];
+    switch(encoder_state&0x30)  {
+        case DIR_CW:
+            last_encoder_position = DIR_CW;
+            break;
+        case DIR_CCW:
+            last_encoder_position = DIR_CCW;
+        default:
+            break;
+    }
 }
 
 void RotaryEncoder::instanceSwitchISR(void)   {
@@ -135,19 +111,19 @@ void RotaryEncoder::instanceSwitchISR(void)   {
     }
 }
 
-void RotaryEncoder::encoderISR0(void)   { RotaryEncoder::encoderISRInstances[0]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR0(void)    { RotaryEncoder::switchISRInstances[0]->instanceSwitchISR(); }
-void RotaryEncoder::encoderISR1(void)   { RotaryEncoder::encoderISRInstances[1]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR1(void)    { RotaryEncoder::switchISRInstances[1]->instanceSwitchISR(); }
-void RotaryEncoder::encoderISR2(void)   { RotaryEncoder::encoderISRInstances[2]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR2(void)    { RotaryEncoder::switchISRInstances[2]->instanceSwitchISR(); }
-void RotaryEncoder::encoderISR3(void)   { RotaryEncoder::encoderISRInstances[3]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR3(void)    { RotaryEncoder::switchISRInstances[3]->instanceSwitchISR(); }
-void RotaryEncoder::encoderISR4(void)   { RotaryEncoder::encoderISRInstances[4]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR4(void)    { RotaryEncoder::switchISRInstances[4]->instanceSwitchISR(); }
-void RotaryEncoder::encoderISR5(void)   { RotaryEncoder::encoderISRInstances[5]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR5(void)    { RotaryEncoder::switchISRInstances[5]->instanceSwitchISR(); }
-void RotaryEncoder::encoderISR6(void)   { RotaryEncoder::encoderISRInstances[6]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR6(void)    { RotaryEncoder::switchISRInstances[6]->instanceSwitchISR(); }
-void RotaryEncoder::encoderISR7(void)   { RotaryEncoder::encoderISRInstances[7]->instanceEncoderISR(); }
-void RotaryEncoder::switchISR7(void)    { RotaryEncoder::switchISRInstances[7]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR0(void)   { RotaryEncoder::ISRInstances[0]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR0(void)    { RotaryEncoder::ISRInstances[0]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR1(void)   { RotaryEncoder::ISRInstances[1]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR1(void)    { RotaryEncoder::ISRInstances[1]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR2(void)   { RotaryEncoder::ISRInstances[2]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR2(void)    { RotaryEncoder::ISRInstances[2]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR3(void)   { RotaryEncoder::ISRInstances[3]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR3(void)    { RotaryEncoder::ISRInstances[3]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR4(void)   { RotaryEncoder::ISRInstances[4]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR4(void)    { RotaryEncoder::ISRInstances[4]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR5(void)   { RotaryEncoder::ISRInstances[5]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR5(void)    { RotaryEncoder::ISRInstances[5]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR6(void)   { RotaryEncoder::ISRInstances[6]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR6(void)    { RotaryEncoder::ISRInstances[6]->instanceSwitchISR(); }
+void RotaryEncoder::encoderISR7(void)   { RotaryEncoder::ISRInstances[7]->instanceEncoderISR(); }
+void RotaryEncoder::switchISR7(void)    { RotaryEncoder::ISRInstances[7]->instanceSwitchISR(); }
